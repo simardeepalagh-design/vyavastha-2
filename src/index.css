@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+@theme {
+  --color-primary: #3B82F6;
+  --color-primary-hover: #2563EB;
+  --color-navy: #0F172A;
+  --color-navy-light: #1E293B;
+  --color-navy-lighter: #334155;
+  --color-border: #334155;
+  --color-text-main: #F8FAFC;
+  --color-text-muted: #94A3B8;
+  --color-danger: #EF4444;
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+}
+
+@layer base {
+  body {
+    @apply bg-navy text-text-main font-sans antialiased m-0 p-0;
+  }
+}
+
+/* Custom Utilities */
+@layer utilities {
+  .card {
+    @apply bg-navy-light border border-border rounded-xl shadow-lg;
+  }
+  .input-field {
+    @apply w-full bg-navy border border-border rounded-lg px-4 py-2 text-text-main focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all;
+  }
+  .btn-primary {
+    @apply bg-primary hover:bg-primary-hover text-white font-medium py-2 px-4 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-navy disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-secondary {
+    @apply bg-navy-lighter hover:bg-border text-text-main font-medium py-2 px-4 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-border focus:ring-offset-2 focus:ring-offset-navy;
+  }
+  .btn-danger {
+    @apply bg-danger hover:bg-red-600 text-white font-medium py-2 px-4 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-danger focus:ring-offset-2 focus:ring-offset-navy;
+  }
+}
