@@ -108,7 +108,7 @@ export default function GlobalOverview({ user }) {
       alert('Warehouse created successfully');
     } catch (err) {
       console.error(err);
-      alert('Failed to create warehouse');
+      alert(`Failed to create warehouse: ${err.message || 'Unknown error'}`);
     } finally {
       setCreating(false);
     }
