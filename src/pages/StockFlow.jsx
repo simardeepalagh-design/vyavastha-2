@@ -1,5 +1,17 @@
 import { useState, useEffect, useContext } from 'react';
-import { UploadCloud, FileText, CheckCircle2, Loader2, Plus, Trash2, Edit2 } from 'lucide-react';
+import { 
+  UploadCloud, 
+  FileText, 
+  CheckCircle2, 
+  Loader2, 
+  Plus, 
+  Trash2, 
+  Edit2, 
+  Lightbulb, 
+  Ruler, 
+  ShieldCheck, 
+  Image as ImageIcon 
+} from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabase';
 import { ProjectContext } from '../context/ProjectContext';
@@ -699,134 +711,52 @@ Return ALL items found, even if there are 50+ items.`
               }
             );
 
-            const {
-              data: newAlert,
-              error: alertErr
-            } = await supabase
-              .from('alerts')
-              .insert({
-                product_id:
-                  productId,
+            // Check if active alert already exists
+            const { data: existingAlert, error: alertCheckErr } = 
+              await supabase
+                .from('alerts')
+                .select('id')
+                .eq('product_id', productId)
+                .eq('project_id', currentProjectId)
+                .eq('status', 'active')
+                .maybeSingle()
 
-                project_id:
-                  currentProjectId,
+            console.log('existing alert check:', existingAlert, alertCheckErr)
 
-                status:
-                  'active',
+            if (!existingAlert) {
+              // No active alert — create one
+              const { error: alertInsertErr } = await supabase
+                .from('alerts')
+                .insert({
+                  product_id: productId,
+                  project_id: currentProjectId,
+                  status: 'active',
+                  triggered_at: now
+                })
 
-                triggered_at:
-                  now
-              })
-              .select()
-              .single();
-
-            // ─────────────────────────────
-            // Existing active alert
-            // ─────────────────────────────
-
-            if (alertErr) {
-
-              if (
-                alertErr.code ===
-                '23505'
-              ) {
-
-                console.log(
-                  'Active low-stock alert already exists. Email will not be sent again.'
-                );
-
+              if (alertInsertErr) {
+                console.error('Alert insert error:', alertInsertErr)
               } else {
-
-                console.error(
-                  'Alert insert failed:',
-                  alertErr
-                );
-              }
-
-            } else if (newAlert) {
-
-              // ─────────────────────────────
-              // BRAND NEW ALERT
-              // ─────────────────────────────
-
-              console.log(
-                'NEW LOW-STOCK ALERT CREATED:',
-                newAlert
-              );
-
-              console.log(
-                'Calling send-low-stock-alert Edge Function...'
-              );
-
-              try {
-
-                const {
-                  data: emailData,
-                  error: emailErr
-                } = await supabase.functions.invoke(
-                  'send-low-stock-alert',
-                  {
-                    body: {
-                      product_id:
-                        productId,
-
-                      project_id:
-                        currentProjectId,
-
-                      current_qty:
-                        newQty,
-
-                      threshold
-                    }
-                  }
-                );
-
-                console.log(
-                  'send-low-stock-alert response:',
-                  {
-                    data:
-                      emailData,
-                    error:
-                      emailErr
-                  }
-                );
-
-                if (emailErr) {
-
-                  console.error(
-                    'Low-stock email failed to send:',
-                    emailErr
-                  );
-
-                  console.error(
-                    'Email function error details:',
+                console.log('New alert created, sending email...')
+                
+                // Send email
+                const { data: emailData, error: emailErr } = 
+                  await supabase.functions.invoke(
+                    'send-low-stock-alert',
                     {
-                      message:
-                        emailErr.message,
-                      name:
-                        emailErr.name,
-                      context:
-                        emailErr.context
+                      body: {
+                        product_id: productId,
+                        project_id: currentProjectId,
+                        current_qty: newQty,
+                        threshold
+                      }
                     }
-                  );
-
-                } else {
-
-                  console.log(
-                    'LOW-STOCK EMAIL FUNCTION SUCCESS:',
-                    emailData
-                  );
-
-                }
-
-              } catch (emailException) {
-
-                console.error(
-                  'Exception while invoking low-stock email function:',
-                  emailException
-                );
-
+                  )
+                
+                console.log('Email function response:', emailData, emailErr)
               }
+            } else {
+              console.log('Alert already exists, skip email')
             }
           }
         }
@@ -909,88 +839,156 @@ Return ALL items found, even if there are 50+ items.`
 
   if (step === 1) {
     return (
-      <div className="max-w-3xl mx-auto">
-        <h1 className="text-2xl font-bold text-white mb-6">{title}</h1>
+      <div className="max-w-4xl mx-auto space-y-8 font-sans">
+        
+        {/* Centered Heading */}
+        <div className="text-center max-w-xl mx-auto mt-4">
+          <h1 className="text-3xl font-extrabold text-slate-900 font-heading tracking-tight">{title}</h1>
+          <p className="text-slate-500 text-sm mt-2">
+            Our AI-powered engine will automatically extract item names, quantities, and prices from your scanned documents to update your inventory in seconds.
+          </p>
+        </div>
 
-        <label className="card p-8 md:p-12 text-center border-dashed border-2 border-border hover:border-primary/50 transition-colors cursor-pointer group block">
-          <input
-            id="billUpload"
-            type="file"
-            className="hidden"
-            accept="image/*,.pdf"
-            onChange={handleFileUpload}
-          />
+        {/* Upload Container Box matching Screenshot 3 */}
+        <div className="card p-10 bg-white border border-slate-200/80 shadow-md">
+          <label className="border-dashed border-2 border-slate-200 hover:border-blue-500/50 bg-slate-50/50 hover:bg-slate-50 rounded-2xl p-10 text-center transition-all cursor-pointer group flex flex-col items-center justify-center min-h-[280px]">
+            <input
+              id="billUpload"
+              type="file"
+              className="hidden"
+              accept="image/*,.pdf"
+              onChange={handleFileUpload}
+            />
 
-          <input
-            id="excelUpload"
-            type="file"
-            className="hidden"
-            accept=".xlsx,.xls,.csv"
-            onChange={handleExcelUpload}
-          />
-          <div className="w-16 h-16 bg-navy rounded-full flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform">
-            <UploadCloud className="w-8 h-8 text-primary" />
+            <input
+              id="excelUpload"
+              type="file"
+              className="hidden"
+              accept=".xlsx,.xls,.csv"
+              onChange={handleExcelUpload}
+            />
+
+            <div className="w-14 h-14 bg-blue-600 rounded-full flex items-center justify-center mb-5 group-hover:scale-105 transition-transform shadow-md shadow-blue-500/10">
+              <UploadCloud className="w-6 h-6 text-white" />
+            </div>
+
+            <h3 className="text-base font-bold text-slate-800 font-heading mb-1">Drop bill image here or click to upload</h3>
+            <p className="text-slate-400 text-xs mb-6">Supported formats: JPG, PNG • Max size 10MB</p>
+
+            <div className="flex flex-wrap justify-center gap-3">
+              <label
+                htmlFor="billUpload"
+                className="btn-primary cursor-pointer inline-flex items-center justify-center gap-2 text-xs py-2 px-5"
+              >
+                <FileText className="w-4 h-4" />
+                Scan Bill
+              </label>
+
+              <label
+                htmlFor="excelUpload"
+                className="btn-secondary cursor-pointer inline-flex items-center justify-center gap-2 text-xs py-2 px-5"
+              >
+                📊 Import Excel
+              </label>
+            </div>
+          </label>
+        </div>
+
+        {/* Tip Cards Grid matching Screenshot 3 footer */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          
+          {/* Tip 1 */}
+          <div className="card p-5 bg-white flex gap-4 items-start border border-slate-200/60">
+            <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+              <Lightbulb className="w-4 h-4 text-blue-600" />
+            </div>
+            <div>
+              <h4 className="text-xs font-bold text-slate-800">Good Lighting</h4>
+              <p className="text-[10px] text-slate-400 leading-normal mt-1">Ensure the bill is well-lit for accurate AI character recognition.</p>
+            </div>
           </div>
-          <h3 className="text-xl font-medium text-white mb-2">Drop bill image here or click to upload</h3>
-          <p className="text-text-muted text-sm mb-8">Supported formats: JPG • PNG • PDF • XLSX • XLS • CSV </p>
 
-          <div className="flex justify-center gap-4">
-
-            <label
-              htmlFor="billUpload"
-              className="btn-primary cursor-pointer inline-flex items-center justify-center min-w-[180px]"
-            >
-              <FileText className="w-5 h-5 mr-2" />
-              Scan Bill
-            </label>
-
-            <label
-              htmlFor="excelUpload"
-              className="btn-secondary cursor-pointer inline-flex items-center justify-center min-w-[180px]"
-            >
-              📊 Import Excel
-            </label>
-
+          {/* Tip 2 */}
+          <div className="card p-5 bg-white flex gap-4 items-start border border-slate-200/60">
+            <div className="w-9 h-9 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+              <Ruler className="w-4 h-4 text-blue-600" />
+            </div>
+            <div>
+              <h4 className="text-xs font-bold text-slate-800">Align Straight</h4>
+              <p className="text-[10px] text-slate-400 leading-normal mt-1">Place the document flat to avoid skewed text extraction.</p>
+            </div>
           </div>
-        </label>
+
+          {/* Tip 3 */}
+          <div className="card p-5 bg-white flex gap-4 items-start border border-slate-200/60">
+            <div className="w-9 h-9 rounded-lg bg-amber-50 flex items-center justify-center shrink-0">
+              <ShieldCheck className="w-4 h-4 text-amber-600" />
+            </div>
+            <div>
+              <h4 className="text-xs font-bold text-slate-800">Manual Review</h4>
+              <p className="text-[10px] text-slate-400 leading-normal mt-1">You can always edit detected fields before finalizing.</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Center Footer copyright */}
+        <div className="text-center py-6 border-t border-slate-100 mt-8">
+          <p className="text-[10px] text-slate-400">© 2026 Vyavastha AI Logistics • Powered by NeuralCloud™ Extraction</p>
+        </div>
       </div>
     );
   }
 
   if (step === 2 || step === 5) {
     return (
-      <div className="max-w-3xl mx-auto flex flex-col items-center justify-center min-h-[400px]">
-        <Loader2 className="w-12 h-12 text-primary animate-spin mb-4" />
-        <h2 className="text-xl font-bold text-white">{step === 2 ? 'Gemini is reading your bill...' : 'Updating Database...'}</h2>
-        <p className="text-text-muted mt-2">{step === 2 ? 'Extracting items and quantities with AI' : 'Saving items to your inventory'}</p>
+      <div className="max-w-md mx-auto flex flex-col items-center justify-center min-h-[450px] text-center font-sans">
+        <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mb-6 shadow-sm border border-blue-100/30">
+          <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
+        </div>
+        <h2 className="text-xl font-bold text-slate-800 font-heading">{step === 2 ? 'Gemini is reading your bill...' : 'Updating Database...'}</h2>
+        <p className="text-slate-400 text-xs mt-2 max-w-[280px]">
+          {step === 2 ? 'Extracting items, prices and quantities automatically with advanced AI' : 'Saving item counts and configurations to the cloud'}
+        </p>
       </div>
     );
   }
 
   if (step === 3) {
     return (
-      <div className="max-w-6xl mx-auto">
-        <h1 className="text-2xl font-bold text-white mb-6">{confirmTitle}</h1>
+      <div className="max-w-6xl mx-auto space-y-6 font-sans">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900 font-heading tracking-tight">{confirmTitle}</h1>
+            <p className="text-slate-400 text-xs mt-0.5">Please review the extracted quantities before submitting</p>
+          </div>
+          <button 
+            onClick={addItem} 
+            className="px-3.5 py-1.5 text-xs font-bold bg-blue-50 hover:bg-blue-100 text-blue-600 rounded-lg flex items-center gap-1.5 transition-all cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5" /> Add Row
+          </button>
+        </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
+          {/* Left extracted items form */}
+          <div className="lg:col-span-2 space-y-4">
             <div className="card overflow-hidden">
-              <div className="p-4 border-b border-border flex justify-between items-center bg-navy">
-                <h3 className="font-semibold text-white">Extracted Items</h3>
-                <button onClick={addItem} className="text-sm flex items-center text-primary hover:text-primary-hover">
-                  <Plus className="w-4 h-4 mr-1" /> Add Row
-                </button>
+              <div className="p-4 border-b border-slate-200/80 flex justify-between items-center bg-slate-50">
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Extracted Items</h3>
+                <span className="text-[10px] font-bold text-slate-400">{items.length} items detected</span>
               </div>
-              <div className="p-4">
-                <div className="space-y-3">
-                  {items.map((item) => (
-                    <div key={item.id} className="flex items-center gap-3 bg-navy p-3 rounded-lg border border-border">
+              <div className="p-4 max-h-[50vh] overflow-y-auto divide-y divide-slate-100">
+                {items.length === 0 ? (
+                  <p className="text-slate-400 text-xs text-center py-8">No items in the list. Click "Add Row" to append an item.</p>
+                ) : (
+                  items.map((item) => (
+                    <div key={item.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
                       <div className="flex-1">
                         <input
                           type="text"
                           value={item.name}
                           onChange={(e) => updateItem(item.id, 'name', e.target.value)}
-                          className="input-field py-1.5 text-sm"
+                          className="input-field py-1.5 text-xs placeholder-slate-400"
                           placeholder="Item Name"
                         />
                       </div>
@@ -999,7 +997,7 @@ Return ALL items found, even if there are 50+ items.`
                           type="number"
                           value={item.qty}
                           onChange={(e) => updateItem(item.id, 'qty', parseInt(e.target.value) || 0)}
-                          className="input-field py-1.5 text-sm"
+                          className="input-field py-1.5 text-xs placeholder-slate-400 text-center"
                           placeholder="Qty"
                         />
                       </div>
@@ -1007,7 +1005,7 @@ Return ALL items found, even if there are 50+ items.`
                         <select
                           value={item.unit}
                           onChange={(e) => updateItem(item.id, 'unit', e.target.value)}
-                          className="input-field py-1.5 text-sm appearance-none bg-navy-light"
+                          className="input-field py-1.5 text-xs bg-white text-slate-800"
                         >
                           <option value="pcs">pcs</option>
                           <option value="m">m</option>
@@ -1017,20 +1015,27 @@ Return ALL items found, even if there are 50+ items.`
                       </div>
                       <button
                         onClick={() => deleteItem(item.id)}
-                        className="p-2 text-text-muted hover:text-danger hover:bg-danger/10 rounded-md transition-colors"
+                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
-                  ))}
-                </div>
+                  ))
+                )}
               </div>
-              <div className="p-4 border-t border-border bg-navy-light flex justify-end gap-3">
-                <button onClick={() => { setBillImageUrl(null); setBillFileType(null); setStep(1); setIsSubmitting(false); }} className="btn-secondary">Cancel</button>
+              
+              {/* Footer inside the card */}
+              <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                <button 
+                  onClick={() => { setBillImageUrl(null); setBillFileType(null); setStep(1); setIsSubmitting(false); }} 
+                  className="btn-secondary text-xs"
+                >
+                  Cancel
+                </button>
                 <button
                   onClick={handleConfirm}
                   disabled={isSubmitting}
-                  className="btn-primary bg-success hover:bg-emerald-600 shadow-[0_0_15px_rgba(16,185,129,0.3)]"
+                  className="btn-primary text-xs bg-green-600 hover:bg-green-700 shadow-md shadow-green-500/10 flex items-center justify-center min-w-[120px]"
                 >
                   {isSubmitting ? 'Saving...' : `Confirm & ${isAdd ? 'Add to Stock' : 'Deduct from Stock'}`}
                 </button>
@@ -1038,9 +1043,10 @@ Return ALL items found, even if there are 50+ items.`
             </div>
           </div>
 
-          <div className="card p-4 h-[500px] flex flex-col">
-            <h3 className="font-semibold text-white mb-4 border-b border-border pb-3">Bill Preview</h3>
-            <div className="flex-1 bg-navy border border-border rounded-lg flex items-center justify-center relative overflow-hidden">
+          {/* Right bill preview panel */}
+          <div className="card p-4 h-[520px] flex flex-col">
+            <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider mb-3 border-b border-slate-100 pb-2">Bill Preview</h3>
+            <div className="flex-1 bg-slate-50 border border-slate-200/80 rounded-xl flex items-center justify-center relative overflow-hidden">
               {billImageUrl ? (
                 billFileType === 'pdf' ? (
                   <iframe src={billImageUrl} className="w-full h-full" title="Bill PDF preview" />
@@ -1048,7 +1054,10 @@ Return ALL items found, even if there are 50+ items.`
                   <img src={billImageUrl} alt="Uploaded bill" className="w-full h-full object-contain" />
                 )
               ) : (
-                <FileText className="w-16 h-16 text-text-muted opacity-50" />
+                <div className="text-center p-6">
+                  <FileText className="w-12 h-12 text-slate-300 mx-auto mb-2" />
+                  <p className="text-slate-400 text-xs">No preview available</p>
+                </div>
               )}
             </div>
           </div>
@@ -1057,14 +1066,14 @@ Return ALL items found, even if there are 50+ items.`
     );
   }
 
-  // Step 4: Success Toast/View
+  // Step 4: Success View
   return (
-    <div className="max-w-md mx-auto text-center py-20 flex flex-col items-center">
-      <div className="w-20 h-20 bg-success/20 rounded-full flex items-center justify-center mb-6">
-        <CheckCircle2 className="w-10 h-10 text-success" />
+    <div className="max-w-md mx-auto text-center py-24 flex flex-col items-center font-sans">
+      <div className="w-16 h-16 bg-green-50 rounded-full flex items-center justify-center mb-6 border border-green-200/40 shadow-sm">
+        <CheckCircle2 className="w-8 h-8 text-green-600" />
       </div>
-      <h2 className="text-2xl font-bold text-white">Stock {isAdd ? 'updated' : 'deducted'} successfully!</h2>
-      <p className="text-text-muted mt-2">Redirecting back...</p>
+      <h2 className="text-2xl font-bold text-slate-900 font-heading">Stock {isAdd ? 'updated' : 'deducted'} successfully!</h2>
+      <p className="text-slate-400 text-xs mt-2">Redirecting you back to the dashboard...</p>
     </div>
   );
 }

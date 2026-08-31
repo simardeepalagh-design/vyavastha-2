@@ -1,40 +1,44 @@
 @import "tailwindcss";
 
 @theme {
-  --color-primary: #3B82F6;
-  --color-primary-hover: #2563EB;
-  --color-navy: #0F172A;
-  --color-navy-light: #1E293B;
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-navy: #0f172a;
+  --color-navy-light: #1e293b;
   --color-navy-lighter: #334155;
-  --color-border: #334155;
-  --color-text-main: #F8FAFC;
-  --color-text-muted: #94A3B8;
-  --color-danger: #EF4444;
-  --color-success: #10B981;
-  --color-warning: #F59E0B;
+  --color-border: #e2e8f0;
+  --color-text-main: #0f172a;
+  --color-text-muted: #64748b;
+  --color-danger: #dc2626;
+  --color-success: #16a34a;
+  --color-warning: #ea580c;
+  --font-sans: 'Plus Jakarta Sans', sans-serif;
+  --font-heading: 'Outfit', sans-serif;
 }
 
 @layer base {
   body {
-    @apply bg-navy text-text-main font-sans antialiased m-0 p-0;
+    @apply bg-slate-950 font-sans antialiased m-0 p-0 min-h-screen text-slate-900;
+    background-image: radial-gradient(rgba(255, 255, 255, 0.12) 1px, transparent 1px);
+    background-size: 24px 24px;
   }
 }
 
 /* Custom Utilities */
 @layer utilities {
   .card {
-    @apply bg-navy-light border border-border rounded-xl shadow-lg;
+    @apply bg-white border border-slate-200/80 rounded-2xl shadow-xs;
   }
   .input-field {
-    @apply w-full bg-navy border border-border rounded-lg px-4 py-2 text-text-main focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all;
+    @apply w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all shadow-xs;
   }
   .btn-primary {
-    @apply bg-primary hover:bg-primary-hover text-white font-medium py-2 px-4 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 focus:ring-offset-navy disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply bg-primary hover:bg-primary-hover text-white font-semibold py-2.5 px-5 rounded-xl transition-all shadow-xs shadow-blue-500/10 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-secondary {
-    @apply bg-navy-lighter hover:bg-border text-text-main font-medium py-2 px-4 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-border focus:ring-offset-2 focus:ring-offset-navy;
+    @apply bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 font-semibold py-2.5 px-5 rounded-xl transition-all cursor-pointer;
   }
   .btn-danger {
-    @apply bg-danger hover:bg-red-600 text-white font-medium py-2 px-4 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-danger focus:ring-offset-2 focus:ring-offset-navy;
+    @apply bg-danger hover:bg-red-700 text-white font-semibold py-2.5 px-5 rounded-xl transition-all cursor-pointer;
   }
 }
