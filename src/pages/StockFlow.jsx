@@ -10,7 +10,8 @@ import {
   Lightbulb, 
   Ruler, 
   ShieldCheck, 
-  Image as ImageIcon 
+  Image as ImageIcon,
+  AlertTriangle
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../supabase';
@@ -18,6 +19,7 @@ import { ProjectContext } from '../context/ProjectContext';
 import * as XLSX from "xlsx";
 import Papa from "papaparse";
 import { extractExcelWithGemini } from "../services/geminiExcel";
+import { resolveItemQuantity } from "../services/quantityResolver";
 
 const BILLS_BUCKET = 'bills'; // single source of truth for the bucket name
 
@@ -102,7 +104,57 @@ export default function StockFlow({ type, user }) {
     return null;
   };
 
-  const uploadBillImage = async (file) => {
+  const calculateFileHash = async (file) => {
+    const arrayBuffer = await file.arrayBuffer();
+    const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+  };
+
+  const checkDuplicateBill = async (file, isAdd, projectId) => {
+    if (!projectId || !file) return { isDuplicate: false };
+
+    try {
+      const contentHash = await calculateFileHash(file);
+      const dbTxnType = isAdd ? 'inward' : 'outward';
+
+      const { data: existingTxns, error } = await supabase
+        .from('transactions')
+        .select('id, timestamp, type, bill_image_url')
+        .eq('project_id', projectId)
+        .eq('type', dbTxnType)
+        .ilike('bill_image_url', `%${contentHash}%`)
+        .limit(1);
+
+      if (error) {
+        console.error('Error checking duplicate bill:', error);
+        return { isDuplicate: false, contentHash };
+      }
+
+      if (existingTxns && existingTxns.length > 0) {
+        const existing = existingTxns[0];
+        const txnDate = new Date(existing.timestamp).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric'
+        });
+        const typeLabel = isAdd ? 'stock addition' : 'stock deduction';
+        return {
+          isDuplicate: true,
+          message: `Duplicate Bill Detected: This bill was already uploaded for ${typeLabel} on ${txnDate}.`,
+          existing,
+          contentHash
+        };
+      }
+
+      return { isDuplicate: false, contentHash };
+    } catch (err) {
+      console.error('Error in duplicate check:', err);
+      return { isDuplicate: false };
+    }
+  };
+
+  const uploadBillImage = async (file, hash) => {
     if (!currentProjectId) {
       throw new Error('No project selected');
     }
@@ -112,7 +164,9 @@ export default function StockFlow({ type, user }) {
       '-'
     );
 
-    const filePath = `${currentProjectId}/${Date.now()}-${crypto.randomUUID()}-${safeFileName}`;
+    const contentHash = hash || (await calculateFileHash(file));
+    const dbTxnType = isAdd ? 'inward' : 'outward';
+    const filePath = `${currentProjectId}/${dbTxnType}/${contentHash}_${safeFileName}`;
 
     const { error } = await supabase.storage
       .from(BILLS_BUCKET)
@@ -164,7 +218,7 @@ export default function StockFlow({ type, user }) {
     return signedData.signedUrl;
   };
 
-  const handleFileUpload = (e) => {
+  const handleFileUpload = async (e) => {
     const file = e.target.files[0];
 
     if (!file) return;
@@ -173,6 +227,14 @@ export default function StockFlow({ type, user }) {
       alert(
         'No project selected. Please contact your administrator.'
       );
+      return;
+    }
+
+    const dupCheck = await checkDuplicateBill(file, isAdd, currentProjectId);
+
+    if (dupCheck?.isDuplicate) {
+      alert(dupCheck.message);
+      e.target.value = '';
       return;
     }
 
@@ -198,7 +260,8 @@ export default function StockFlow({ type, user }) {
 
         const uploadedBillImageUrl =
           await uploadBillImage(
-            compressedFile
+            compressedFile,
+            dupCheck?.contentHash
           );
 
         setBillImageUrl(
@@ -225,17 +288,50 @@ export default function StockFlow({ type, user }) {
                   },
                   {
                     text: `Read this bill image carefully.
-Extract every line item and return
-ONLY a JSON array, no markdown,
-no backticks, no explanation.
+Extract every line item independently and return ONLY a JSON array, no markdown, no backticks, no explanation.
 
-Format:
-[{"name":"product name","qty":100,"unit":"Pcs"}]
+Header Semantics for Quantity Columns:
+- Requested Quantity headers: Requested, Requested Qty, Ordered, Ordered Qty, Indent Qty, Demand, Demand Qty, Requisition Qty, Required Qty.
+- Granted/Issued Quantity headers: Granted, Granted Qty, Issued, Issued Qty, Approved, Approved Qty, Supplied, Supplied Qty, Dispatched, Dispatched Qty, Actual Qty, Delivered Qty, Sanctioned Qty.
 
-If unit not clear use Pcs as default.
+Quantity Extraction Rules:
+1. If document contains BOTH a Requested quantity column AND a Granted/Issued/Supplied column:
+   - Set "requested_qty" to the number under Requested/Ordered.
+   - Set "issued_qty" to the number under Granted/Issued/Supplied/Approved.
+   - Set "qty" to the issued_qty value.
+   - Set "qty_ambiguous" to false.
+2. If document contains ONLY ONE quantity column:
+   - Set "qty" to that single number.
+   - Set "requested_qty" to null and "issued_qty" to null.
+   - Set "qty_ambiguous" to false.
+3. If document contains multiple numeric quantity columns but header labels are ambiguous or missing (e.g. "Qty 1", "Qty 2", or unlabeled):
+   - Set "qty_ambiguous" to true.
+   - Populate "requested_qty" and "issued_qty" with the extracted numbers.
 
-Extract EVERY SINGLE line item from this document,
-no matter how many there are.
+Critical UOM / Unit Instructions:
+- Extract each item's Unit of Measurement (UOM) strictly from its own individual row.
+- Look for header columns such as "Unit", "UOM", "Uom", "Unit of Measurement", "Pack", "Qty Unit", "Measure", etc., or recognize common unit values (kg, g, ltr, ml, pcs, box, dozen, pack, bag, m, etc.) present on that row.
+- DO NOT carry over, infer, or copy the unit from any previous or neighboring row.
+- DO NOT default or force a unit (like "pcs" or "Pcs").
+- If a unit is missing, unreadable, or not present for a specific row, set "unit" to "" (empty string) for that item ONLY.
+- DO NOT perform unit conversions. Preserve the unit text exactly as printed on the bill.
+
+If threshold is not specified in document, omit threshold or set to null.
+
+Schema per item:
+[
+  {
+    "name": "product name",
+    "requested_qty": 100,
+    "issued_qty": 40,
+    "qty": 40,
+    "threshold": 10,
+    "unit": "pcs",
+    "qty_ambiguous": false
+  }
+]
+
+Extract EVERY SINGLE line item from this document, no matter how many there are.
 Do not skip or summarize any rows.
 Return ALL items found, even if there are 50+ items.`
                   }
@@ -280,12 +376,21 @@ Return ALL items found, even if there are 50+ items.`
 
         const newItems =
           parsedItems.map(
-            (item, index) => ({
-              id: index + 1,
-              name: item.name || '',
-              qty: item.qty || 0,
-              unit: item.unit || 'Pcs'
-            })
+            (item, index) => {
+              const resolved = resolveItemQuantity(item, isAdd);
+
+              return {
+                id: index + 1,
+                name: item.name || '',
+                qty: resolved.qty,
+                requestedQty: item.requested_qty ?? null,
+                issuedQty: item.issued_qty ?? null,
+                isAmbiguous: resolved.isAmbiguous,
+                warningMessage: resolved.warningMessage || '',
+                threshold: item.threshold !== undefined && item.threshold !== null && item.threshold !== '' && !isNaN(Number(item.threshold)) ? Number(item.threshold) : '',
+                unit: item.unit !== undefined && item.unit !== null ? String(item.unit).trim() : ''
+              };
+            }
           );
 
         setItems(newItems);
@@ -324,6 +429,21 @@ Return ALL items found, even if there are 50+ items.`
 
     if (!file) return;
 
+    if (!currentProjectId) {
+      alert(
+        'No project selected. Please contact your administrator.'
+      );
+      return;
+    }
+
+    const dupCheck = await checkDuplicateBill(file, isAdd, currentProjectId);
+
+    if (dupCheck?.isDuplicate) {
+      alert(dupCheck.message);
+      e.target.value = '';
+      return;
+    }
+
     const extension =
       file.name
         .split(".")
@@ -340,7 +460,8 @@ Return ALL items found, even if there are 50+ items.`
           try {
             const imported =
               await extractExcelWithGemini(
-                results.data
+                results.data,
+                isAdd
               );
 
             setItems(imported);
@@ -391,7 +512,8 @@ Return ALL items found, even if there are 50+ items.`
 
         const imported =
           await extractExcelWithGemini(
-            rows
+            rows,
+            isAdd
           );
 
         setItems(imported);
@@ -439,7 +561,7 @@ Return ALL items found, even if there are 50+ items.`
           continue;
         }
 
-        console.log('saving item:', item.name, 'qty:', item.qty);
+        console.log('saving item:', item.name, 'qty:', item.qty, 'threshold:', item.threshold);
 
         // ─────────────────────────────
         // Step 1: Find product
@@ -546,33 +668,53 @@ Return ALL items found, even if there are 50+ items.`
           existingStock?.current_qty ??
           0;
 
-        const threshold =
-          existingStock?.threshold ??
-          10;
+        // Determine threshold value to save
+        let userThreshold = null;
+        if (item.threshold !== '' && item.threshold !== null && item.threshold !== undefined && !isNaN(Number(item.threshold))) {
+          userThreshold = Number(item.threshold);
+        } else if (existingStock && existingStock.threshold !== null && existingStock.threshold !== undefined) {
+          userThreshold = existingStock.threshold;
+        }
 
         // ─────────────────────────────
         // ADD STOCK
         // ─────────────────────────────
 
         if (isAdd) {
-          const { data: freshRows, error: fetchErr } = await supabase
-            .from('stock')
-            .select('current_qty, threshold')
-            .eq('product_id', productId)
-            .limit(1);
+          const newQty = currentQty + item.qty;
 
-          if (fetchErr) {
-            throw fetchErr;
+          console.log('current db qty:', currentQty, 
+                      'adding:', item.qty,
+                      'result will be:', newQty,
+                      'threshold to save:', userThreshold);
+
+          // Update or insert stock table
+          if (existingStock) {
+            const { error: stUpdateErr } = await supabase
+              .from('stock')
+              .update({
+                current_qty: newQty,
+                threshold: userThreshold,
+                last_updated: now
+              })
+              .eq('product_id', productId);
+
+            if (stUpdateErr) throw stUpdateErr;
+          } else {
+            const { error: stInsertErr } = await supabase
+              .from('stock')
+              .insert({
+                product_id: productId,
+                project_id: currentProjectId,
+                current_qty: newQty,
+                threshold: userThreshold,
+                last_updated: now
+              });
+
+            if (stInsertErr) throw stInsertErr;
           }
 
-          const existing = freshRows && freshRows.length > 0 ? freshRows[0] : null;
-
-          console.log('current db qty:', existing?.current_qty, 
-                      'adding:', item.qty,
-                      'result will be:', (existing?.current_qty || 0) + item.qty);
-
-          const finalThreshold = existing?.threshold ?? 10;
-          const newQty = (existing?.current_qty || 0) + item.qty;
+          const finalThreshold = userThreshold ?? 10;
 
           // ─────────────────────────────
           // Resolve active alert if stock
@@ -648,9 +790,20 @@ Return ALL items found, even if there are 50+ items.`
             return;
           }
 
-          const newQty =
-            currentQty -
-            item.qty;
+          const newQty = currentQty - item.qty;
+
+          if (existingStock) {
+            const { error: stDeductErr } = await supabase
+              .from('stock')
+              .update({
+                current_qty: newQty,
+                threshold: userThreshold,
+                last_updated: now
+              })
+              .eq('product_id', productId);
+
+            if (stDeductErr) throw stDeductErr;
+          }
 
           // ─────────────────────────────
           // Step 7: Log transaction
@@ -694,9 +847,11 @@ Return ALL items found, even if there are 50+ items.`
           // Step 8: LOW STOCK ALERT
           // ─────────────────────────────
 
+          const finalThreshold = userThreshold ?? 10;
+
           if (
             newQty <
-            threshold
+            finalThreshold
           ) {
 
             console.log(
@@ -707,7 +862,7 @@ Return ALL items found, even if there are 50+ items.`
                   currentProjectId,
                 currentQty:
                   newQty,
-                threshold
+                threshold: finalThreshold
               }
             );
 
@@ -748,7 +903,7 @@ Return ALL items found, even if there are 50+ items.`
                         product_id: productId,
                         project_id: currentProjectId,
                         current_qty: newQty,
-                        threshold
+                        threshold: finalThreshold
                       }
                     }
                   )
@@ -832,6 +987,7 @@ Return ALL items found, even if there are 50+ items.`
         id: newId,
         name: '',
         qty: 0,
+        threshold: '',
         unit: 'pcs'
       }
     ]);
@@ -959,7 +1115,7 @@ Return ALL items found, even if there are 50+ items.`
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
           <div>
             <h1 className="text-2xl font-bold text-slate-900 font-heading tracking-tight">{confirmTitle}</h1>
-            <p className="text-slate-400 text-xs mt-0.5">Please review the extracted quantities before submitting</p>
+            <p className="text-slate-400 text-xs mt-0.5">Please review the extracted quantities and alert thresholds before submitting</p>
           </div>
           <button 
             onClick={addItem} 
@@ -974,9 +1130,44 @@ Return ALL items found, even if there are 50+ items.`
           <div className="lg:col-span-2 space-y-4">
             <div className="card overflow-hidden">
               <div className="p-4 border-b border-slate-200/80 flex justify-between items-center bg-slate-50">
-                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Extracted Items</h3>
-                <span className="text-[10px] font-bold text-slate-400">{items.length} items detected</span>
+                <div className="flex items-center gap-3">
+                  <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">Extracted Items Review</h3>
+                  <span className="text-[10px] font-bold text-slate-400">{items.length} items detected</span>
+                </div>
+                {items.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setItems(items.map(i => ({ ...i, threshold: '' })))}
+                      className="text-[10px] font-semibold text-slate-500 hover:text-red-600 hover:underline cursor-pointer"
+                      title="Clear threshold column for all items"
+                    >
+                      Clear Thresholds
+                    </button>
+                    <span className="text-slate-300">|</span>
+                    <button
+                      type="button"
+                      onClick={() => setItems(items.map(i => ({ ...i, price: '' })))}
+                      className="text-[10px] font-semibold text-slate-500 hover:text-red-600 hover:underline cursor-pointer"
+                      title="Clear price column for all items"
+                    >
+                      Clear Prices
+                    </button>
+                  </div>
+                )}
               </div>
+
+              {items.length > 0 && (
+                <div className="px-4 py-2 bg-slate-100/60 border-b border-slate-200/60 flex items-center gap-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
+                  <div className="flex-1">Item Name</div>
+                  <div className="w-24 text-center">Qty</div>
+                  <div className="w-24 text-center">Threshold</div>
+                  <div className="w-28 text-center">Unit (UOM)</div>
+                  <div className="w-20 text-center">Price (₹)</div>
+                  <div className="w-8"></div>
+                </div>
+              )}
+
               <div className="p-4 max-h-[50vh] overflow-y-auto divide-y divide-slate-100">
                 {items.length === 0 ? (
                   <p className="text-slate-400 text-xs text-center py-8">No items in the list. Click "Add Row" to append an item.</p>
@@ -997,25 +1188,77 @@ Return ALL items found, even if there are 50+ items.`
                           type="number"
                           value={item.qty}
                           onChange={(e) => updateItem(item.id, 'qty', parseInt(e.target.value) || 0)}
-                          className="input-field py-1.5 text-xs placeholder-slate-400 text-center"
+                          className={`input-field py-1.5 text-xs placeholder-slate-400 text-center ${item.isAmbiguous ? 'border-amber-500 bg-amber-50/40 text-amber-900 font-bold focus:ring-amber-500' : ''}`}
                           placeholder="Qty"
                         />
+                        {item.isAmbiguous && (
+                          <span className="flex items-center justify-center gap-0.5 text-[9px] font-bold text-amber-700 mt-0.5" title={item.warningMessage || "Ambiguous quantity headers detected on bill. Please verify."}>
+                            <AlertTriangle className="w-2.5 h-2.5 text-amber-600 shrink-0" /> Verify Qty
+                          </span>
+                        )}
+                        {!isAdd && item.requestedQty !== null && item.issuedQty !== null && item.requestedQty !== item.issuedQty && !item.isAmbiguous && (
+                          <span className="block text-[8px] font-semibold text-slate-400 mt-0.5 text-center" title={`Requested: ${item.requestedQty}, Issued: ${item.issuedQty}`}>
+                            Req:{item.requestedQty} → Iss:{item.issuedQty}
+                          </span>
+                        )}
                       </div>
                       <div className="w-24">
-                        <select
-                          value={item.unit}
+                        <input
+                          type="number"
+                          min="0"
+                          value={item.threshold ?? ''}
+                          onChange={(e) => updateItem(item.id, 'threshold', e.target.value === '' ? '' : (parseInt(e.target.value, 10) >= 0 ? parseInt(e.target.value, 10) : ''))}
+                          className="input-field py-1.5 text-xs placeholder-slate-400 text-center"
+                          placeholder="Threshold"
+                          title="Low stock alert threshold"
+                        />
+                      </div>
+                      <div className="w-28 relative">
+                        <input
+                          type="text"
+                          list="unit-suggestions"
+                          value={item.unit ?? ''}
                           onChange={(e) => updateItem(item.id, 'unit', e.target.value)}
-                          className="input-field py-1.5 text-xs bg-white text-slate-800"
-                        >
-                          <option value="pcs">pcs</option>
-                          <option value="m">m</option>
-                          <option value="kg">kg</option>
-                          <option value="bags">bags</option>
-                        </select>
+                          className={`input-field py-1.5 text-xs placeholder-slate-400 text-center font-medium ${
+                            !item.unit || item.unit.trim() === '' ? 'border-amber-400 bg-amber-50/50 text-amber-900 focus:ring-amber-500 font-bold' : ''
+                          }`}
+                          placeholder="Unit"
+                          title="Unit of measurement"
+                        />
+                        {(!item.unit || item.unit.trim() === '') && (
+                          <span className="flex items-center justify-center gap-0.5 text-[9px] font-bold text-amber-700 mt-0.5" title="Missing UOM - Please specify unit">
+                            <AlertTriangle className="w-2.5 h-2.5 text-amber-600 shrink-0" /> Missing UOM
+                          </span>
+                        )}
+                        <datalist id="unit-suggestions">
+                          <option value="pcs" />
+                          <option value="kg" />
+                          <option value="g" />
+                          <option value="ltr" />
+                          <option value="ml" />
+                          <option value="box" />
+                          <option value="pack" />
+                          <option value="bag" />
+                          <option value="m" />
+                          <option value="dozen" />
+                        </datalist>
+                      </div>
+                      <div className="w-20">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={item.price ?? ''}
+                          onChange={(e) => updateItem(item.id, 'price', e.target.value === '' ? '' : Number(e.target.value))}
+                          className="input-field py-1.5 text-xs placeholder-slate-400 text-center"
+                          placeholder="Price"
+                          title="Price per unit"
+                        />
                       </div>
                       <button
                         onClick={() => deleteItem(item.id)}
-                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                        className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer w-8 shrink-0"
+                        title="Delete item row"
                       >
                         <Trash2 className="w-4 h-4" />
                       </button>
