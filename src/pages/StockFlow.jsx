@@ -26,6 +26,7 @@ const BILLS_BUCKET = 'bills'; // single source of truth for the bucket name
 export default function StockFlow({ type, user }) {
   const [step, setStep] = useState(1); // 1: Upload, 2: Loading, 3: Confirm, 4: Success, 5: Processing DB
   const [items, setItems] = useState([]);
+  const [error, setError] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [billImageUrl, setBillImageUrl] = useState(null);
   const [billFileType, setBillFileType] = useState(null); // 'pdf' | 'image' | null
@@ -43,6 +44,7 @@ export default function StockFlow({ type, user }) {
     setStep(1);
     setBillImageUrl(null);
     setBillFileType(null);
+    setError(null);
     setIsSubmitting(false);
   }, [type]);
 
@@ -161,25 +163,24 @@ export default function StockFlow({ type, user }) {
 
     const timestamp = Date.now();
     const random = Math.random().toString(36).substring(2, 8);
-    const fileName = `${currentProjectId}/${timestamp}_${random}_${file.name}`;
+    const uniqueFileName = currentProjectId + '/' + timestamp + '_' + random + '_' + file.name;
 
-    const { data, error } = await supabase.storage
-      .from(BILLS_BUCKET)
-      .upload(fileName, file, {
-        cacheControl: '3600',
+    const { error: uploadError } = await supabase.storage
+      .from('bills')
+      .upload(uniqueFileName, file, {
         upsert: true,
         contentType: file.type || undefined,
       });
 
-    if (error) {
-      console.error('Supabase upload error:', error);
-      throw new Error(`Upload failed: ${error.message}`);
+    if (uploadError) {
+      console.error('Supabase upload error:', uploadError);
+      throw new Error(`Upload failed: ${uploadError.message}`);
     }
 
     // Try public URL first
     const { data: publicData } = supabase.storage
-      .from(BILLS_BUCKET)
-      .getPublicUrl(fileName);
+      .from('bills')
+      .getPublicUrl(uniqueFileName);
 
     if (publicData?.publicUrl) {
       try {
@@ -199,8 +200,8 @@ export default function StockFlow({ type, user }) {
     // Fallback to signed URL
     const { data: signedData, error: signedErr } =
       await supabase.storage
-        .from(BILLS_BUCKET)
-        .createSignedUrl(fileName, 60 * 60);
+        .from('bills')
+        .createSignedUrl(uniqueFileName, 60 * 60);
 
     if (signedErr) {
       console.error('Signed URL error:', signedErr);
@@ -211,6 +212,47 @@ export default function StockFlow({ type, user }) {
     }
 
     return signedData.signedUrl;
+  };
+
+  const callGeminiWithRetry = async (base64, mimeType, retries = 3) => {
+    for (let i = 0; i < retries; i++) {
+      const response = await fetch(
+        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + 
+        import.meta.env.VITE_GEMINI_API_KEY,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { inline_data: { mime_type: mimeType, data: base64 } },
+                { text: 'Read this bill image carefully. Extract EVERY line item from the table. Look for columns like Material Description, UOM, Requested Qty, Issued Qty. Return ONLY a JSON array, no markdown, no explanation: [{"name":"material name","qty":100,"unit":"EA"}]. Extract ALL rows. Do not skip any row.' }
+              ]
+            }]
+          })
+        }
+      );
+
+      if (response.status === 503 || response.status === 429) {
+        console.log('Gemini busy, retrying in 3 seconds... attempt', i + 1);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        continue;
+      }
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(
+          `Gemini API Error (${response.status}): ${errData.error?.message || response.statusText}`
+        );
+      }
+
+      const data = await response.json();
+      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!text) throw new Error('No response from Gemini');
+      const cleaned = text.replace(/```json|```/g, '').trim();
+      return JSON.parse(cleaned);
+    }
+    throw new Error('Gemini is busy. Please try again in a moment.');
   };
 
   const handleFileUpload = async (e) => {
@@ -233,6 +275,7 @@ export default function StockFlow({ type, user }) {
       return;
     }
 
+    setError(null);
     setBillImageUrl(null);
     setBillFileType(getFileKind(file));
     setStep(2);
@@ -262,126 +305,34 @@ export default function StockFlow({ type, user }) {
           uploadedBillImageUrl
         );
 
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${import.meta.env.VITE_GEMINI_API_KEY}`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              contents: [{
-                parts: [
-                  {
-                    inline_data: {
-                      mime_type:
-                        file.type ||
-                        'image/jpeg',
-                      data: base64
-                    }
-                  },
-                  {
-                    text: `Read this bill image carefully.
-Extract every line item independently and return ONLY a JSON array, no markdown, no backticks, no explanation.
+        const parsedItems = await callGeminiWithRetry(
+          base64,
+          file.type || 'image/jpeg'
+        );
 
-Header Semantics for Quantity Columns:
-- Requested Quantity headers: Requested, Requested Qty, Ordered, Ordered Qty, Indent Qty, Demand, Demand Qty, Requisition Qty, Required Qty.
-- Granted/Issued Quantity headers: Granted, Granted Qty, Issued, Issued Qty, Approved, Approved Qty, Supplied, Supplied Qty, Dispatched, Dispatched Qty, Actual Qty, Delivered Qty, Sanctioned Qty.
+        const newItems = (Array.isArray(parsedItems) ? parsedItems : []).map(
+          (item, index) => {
+            const resolved = resolveItemQuantity(item, isAdd);
 
-Quantity Extraction Rules:
-1. If document contains BOTH a Requested quantity column AND a Granted/Issued/Supplied column:
-   - Set "requested_qty" to the number under Requested/Ordered.
-   - Set "issued_qty" to the number under Granted/Issued/Supplied/Approved.
-   - Set "qty" to the issued_qty value.
-   - Set "qty_ambiguous" to false.
-2. If document contains ONLY ONE quantity column:
-   - Set "qty" to that single number.
-   - Set "requested_qty" to null and "issued_qty" to null.
-   - Set "qty_ambiguous" to false.
-3. If document contains multiple numeric quantity columns but header labels are ambiguous or missing (e.g. "Qty 1", "Qty 2", or unlabeled):
-   - Set "qty_ambiguous" to true.
-   - Populate "requested_qty" and "issued_qty" with the extracted numbers.
-
-Critical UOM / Unit Instructions:
-- Extract each item's Unit of Measurement (UOM) strictly from its own individual row.
-- Look for header columns such as "Unit", "UOM", "Uom", "Unit of Measurement", "Pack", "Qty Unit", "Measure", etc., or recognize common unit values (kg, g, ltr, ml, pcs, box, dozen, pack, bag, m, etc.) present on that row.
-- DO NOT carry over, infer, or copy the unit from any previous or neighboring row.
-- DO NOT default or force a unit (like "pcs" or "Pcs").
-- If a unit is missing, unreadable, or not present for a specific row, set "unit" to "" (empty string) for that item ONLY.
-- DO NOT perform unit conversions. Preserve the unit text exactly as printed on the bill.
-
-Schema per item:
-[
-  {
-    "name": "product name",
-    "requested_qty": 100,
-    "issued_qty": 40,
-    "qty": 40,
-    "unit": "pcs",
-    "qty_ambiguous": false
-  }
-]
-
-Extract EVERY SINGLE line item from this document, no matter how many there are.
-Do not skip or summarize any rows.
-Return ALL items found, even if there are 50+ items.`
-                  }
-                ]
-              }]
-            })
+            return {
+              id: index + 1,
+              name: item.name || '',
+              qty: resolved.qty,
+              requestedQty: item.requested_qty ?? item.requestedQty ?? null,
+              issuedQty: item.issued_qty ?? item.issuedQty ?? null,
+              isAmbiguous: resolved.isAmbiguous,
+              warningMessage: resolved.warningMessage || '',
+              unit: item.unit !== undefined && item.unit !== null ? String(item.unit).trim() : ''
+            };
           }
         );
 
-        if (!response.ok) {
-          const errData =
-            await response
-              .json()
-              .catch(() => ({}));
-
-          throw new Error(
-            `Gemini API Error (${response.status}): ${errData.error?.message ||
-            response.statusText
-            }`
-          );
+        if (!newItems || newItems.length === 0) {
+          setError('Could not read any items from bill. Please try again.');
+          alert('Could not read any items from bill. Please try again.');
+          setStep('upload');
+          return;
         }
-
-        const data =
-          await response.json();
-
-        const text =
-          data?.candidates?.[0]
-            ?.content?.parts?.[0]?.text;
-
-        if (!text) {
-          throw new Error(
-            'No response from Gemini'
-          );
-        }
-
-        const cleaned = text
-          .replace(/```json|```/g, '')
-          .trim();
-
-        const parsedItems =
-          JSON.parse(cleaned);
-
-        const newItems =
-          parsedItems.map(
-            (item, index) => {
-              const resolved = resolveItemQuantity(item, isAdd);
-
-              return {
-                id: index + 1,
-                name: item.name || '',
-                qty: resolved.qty,
-                requestedQty: item.requested_qty ?? null,
-                issuedQty: item.issued_qty ?? null,
-                isAmbiguous: resolved.isAmbiguous,
-                warningMessage: resolved.warningMessage || '',
-                unit: item.unit !== undefined && item.unit !== null ? String(item.unit).trim() : ''
-              };
-            }
-          );
 
         setItems(newItems);
         setStep(3);
@@ -392,23 +343,29 @@ Return ALL items found, even if there are 50+ items.`
           err
         );
 
+        setError(
+          err.message ||
+          'Could not read bill. Please try again.'
+        );
+
         alert(
           err.message ||
           'Could not read bill. Please try again.'
         );
 
         setItems([]);
-        setStep(3);
+        setStep('upload');
       }
     };
 
     reader.onerror = () => {
+      setError('Could not load image file.');
       alert(
         'Could not load image file.'
       );
 
       setItems([]);
-      setStep(3);
+      setStep('upload');
     };
 
     reader.readAsDataURL(file);
@@ -454,22 +411,32 @@ Return ALL items found, even if there are 50+ items.`
                 isAdd
               );
 
+            if (!imported || imported.length === 0) {
+              setError("Could not read any items from CSV. Please try again.");
+              alert("Could not read any items from CSV. Please try again.");
+              setStep('upload');
+              return;
+            }
+
             setItems(imported);
             setStep(3);
 
           } catch (err) {
             console.error(err);
-
+            setError("Unable to process CSV using Gemini.");
             alert(
               "Unable to process CSV using Gemini."
             );
+            setStep('upload');
           }
         },
 
         error: () => {
+          setError("Unable to read CSV file.");
           alert(
             "Unable to read CSV file."
           );
+          setStep('upload');
         },
       });
 
@@ -506,15 +473,23 @@ Return ALL items found, even if there are 50+ items.`
             isAdd
           );
 
+        if (!imported || imported.length === 0) {
+          setError("Could not read any items from Excel file. Please try again.");
+          alert("Could not read any items from Excel file. Please try again.");
+          setStep('upload');
+          return;
+        }
+
         setItems(imported);
         setStep(3);
 
       } catch (err) {
         console.error(err);
-
+        setError("Unable to process Excel file.");
         alert(
           "Unable to process Excel file."
         );
+        setStep('upload');
       }
     };
 
@@ -983,7 +958,7 @@ Return ALL items found, even if there are 50+ items.`
     ]);
   };
 
-  if (step === 1) {
+  if (step === 1 || step === 'upload') {
     return (
       <div className="max-w-4xl mx-auto space-y-8 font-sans">
         
@@ -994,6 +969,22 @@ Return ALL items found, even if there are 50+ items.`
             Our AI-powered engine will automatically extract item names, quantities, and prices from your scanned documents to update your inventory in seconds.
           </p>
         </div>
+
+        {error && (
+          <div className="card p-4 bg-red-50/90 border border-red-200 text-red-700 flex items-center justify-between gap-3 text-xs font-semibold rounded-xl">
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-red-500 shrink-0" />
+              <span>{error}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setError(null)}
+              className="text-red-400 hover:text-red-600 text-xs font-bold cursor-pointer"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
 
         {/* Upload Container Box matching Screenshot 3 */}
         <div className="card p-10 bg-white border border-slate-200/80 shadow-md">
