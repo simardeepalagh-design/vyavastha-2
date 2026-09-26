@@ -154,25 +154,20 @@ export default function StockFlow({ type, user }) {
     }
   };
 
-  const uploadBillImage = async (file, hash) => {
+  const uploadBillImage = async (file) => {
     if (!currentProjectId) {
       throw new Error('No project selected');
     }
 
-    const safeFileName = file.name.replace(
-      /[^a-zA-Z0-9.-]/g,
-      '-'
-    );
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).substring(2, 8);
+    const fileName = `${currentProjectId}/${timestamp}_${random}_${file.name}`;
 
-    const contentHash = hash || (await calculateFileHash(file));
-    const dbTxnType = isAdd ? 'inward' : 'outward';
-    const filePath = `${currentProjectId}/${dbTxnType}/${contentHash}_${safeFileName}`;
-
-    const { error } = await supabase.storage
+    const { data, error } = await supabase.storage
       .from(BILLS_BUCKET)
-      .upload(filePath, file, {
+      .upload(fileName, file, {
         cacheControl: '3600',
-        upsert: false,
+        upsert: true,
         contentType: file.type || undefined,
       });
 
@@ -184,7 +179,7 @@ export default function StockFlow({ type, user }) {
     // Try public URL first
     const { data: publicData } = supabase.storage
       .from(BILLS_BUCKET)
-      .getPublicUrl(filePath);
+      .getPublicUrl(fileName);
 
     if (publicData?.publicUrl) {
       try {
@@ -205,7 +200,7 @@ export default function StockFlow({ type, user }) {
     const { data: signedData, error: signedErr } =
       await supabase.storage
         .from(BILLS_BUCKET)
-        .createSignedUrl(filePath, 60 * 60);
+        .createSignedUrl(fileName, 60 * 60);
 
     if (signedErr) {
       console.error('Signed URL error:', signedErr);
@@ -260,8 +255,7 @@ export default function StockFlow({ type, user }) {
 
         const uploadedBillImageUrl =
           await uploadBillImage(
-            compressedFile,
-            dupCheck?.contentHash
+            compressedFile
           );
 
         setBillImageUrl(
@@ -316,8 +310,6 @@ Critical UOM / Unit Instructions:
 - If a unit is missing, unreadable, or not present for a specific row, set "unit" to "" (empty string) for that item ONLY.
 - DO NOT perform unit conversions. Preserve the unit text exactly as printed on the bill.
 
-If threshold is not specified in document, omit threshold or set to null.
-
 Schema per item:
 [
   {
@@ -325,7 +317,6 @@ Schema per item:
     "requested_qty": 100,
     "issued_qty": 40,
     "qty": 40,
-    "threshold": 10,
     "unit": "pcs",
     "qty_ambiguous": false
   }
@@ -387,7 +378,6 @@ Return ALL items found, even if there are 50+ items.`
                 issuedQty: item.issued_qty ?? null,
                 isAmbiguous: resolved.isAmbiguous,
                 warningMessage: resolved.warningMessage || '',
-                threshold: item.threshold !== undefined && item.threshold !== null && item.threshold !== '' && !isNaN(Number(item.threshold)) ? Number(item.threshold) : '',
                 unit: item.unit !== undefined && item.unit !== null ? String(item.unit).trim() : ''
               };
             }
@@ -561,7 +551,9 @@ Return ALL items found, even if there are 50+ items.`
           continue;
         }
 
-        console.log('saving item:', item.name, 'qty:', item.qty, 'threshold:', item.threshold);
+        console.log('saving item:', item.name, 'qty:', item.qty);
+
+        const trimmedName = item.name.trim();
 
         // ─────────────────────────────
         // Step 1: Find product
@@ -573,9 +565,9 @@ Return ALL items found, even if there are 50+ items.`
         } = await supabase
           .from('products')
           .select('id')
-          .eq(
+          .ilike(
             'name',
-            item.name.trim()
+            trimmedName
           )
           .eq(
             'project_id',
@@ -584,31 +576,23 @@ Return ALL items found, even if there are 50+ items.`
           .limit(1);
 
         if (findErr) {
-          throw findErr;
+          console.error('Error finding product:', findErr);
         }
 
-        let productId;
+        let productId = existingProducts?.[0]?.id;
 
         // ─────────────────────────────
-        // Step 2: Existing product
+        // Step 2: Product exists or needs insert
         // ─────────────────────────────
 
-        if (
-          existingProducts &&
-          existingProducts.length > 0
-        ) {
-          productId =
-            existingProducts[0].id;
-
+        if (productId) {
+          // Product already exists: silently use existing product_id
+          console.log(`Product "${trimmedName}" exists (id: ${productId}). Reusing product silently.`);
         } else {
-
-          // ─────────────────────────────
-          // Step 3: Product doesn't exist
-          // ─────────────────────────────
-
+          // Product does not exist
           if (!isAdd) {
             alert(
-              `Cannot deduct: "${item.name}" not found in this project's inventory.`
+              `Cannot deduct: "${trimmedName}" not found in this project's inventory.`
             );
 
             setIsSubmitting(false);
@@ -622,27 +606,36 @@ Return ALL items found, even if there are 50+ items.`
           } = await supabase
             .from('products')
             .insert({
-              name:
-                item.name.trim(),
-              unit: item.unit,
-              project_id:
-                currentProjectId,
-              category:
-                'General'
+              name: trimmedName,
+              unit: item.unit || '',
+              project_id: currentProjectId,
+              category: 'General'
             })
             .select('id')
             .single();
 
           if (prodErr) {
-            throw prodErr;
-          }
+            // In case of conflict/race condition where product was inserted, fetch existing product
+            console.warn('Product insert error or conflict, checking existing product:', prodErr);
+            const { data: retryProd } = await supabase
+              .from('products')
+              .select('id')
+              .ilike('name', trimmedName)
+              .eq('project_id', currentProjectId)
+              .maybeSingle();
 
-          productId =
-            newProduct.id;
+            if (retryProd?.id) {
+              productId = retryProd.id;
+            } else {
+              throw prodErr;
+            }
+          } else {
+            productId = newProduct.id;
+          }
         }
 
         // ─────────────────────────────
-        // Step 4: Fetch current stock
+        // Step 3: Fetch current stock
         // ─────────────────────────────
 
         const {
@@ -656,6 +649,10 @@ Return ALL items found, even if there are 50+ items.`
             'product_id',
             productId
           )
+          .eq(
+            'project_id',
+            currentProjectId
+          )
           .limit(1);
 
         const existingStock =
@@ -668,13 +665,7 @@ Return ALL items found, even if there are 50+ items.`
           existingStock?.current_qty ??
           0;
 
-        // Determine threshold value to save
-        let userThreshold = null;
-        if (item.threshold !== '' && item.threshold !== null && item.threshold !== undefined && !isNaN(Number(item.threshold))) {
-          userThreshold = Number(item.threshold);
-        } else if (existingStock && existingStock.threshold !== null && existingStock.threshold !== undefined) {
-          userThreshold = existingStock.threshold;
-        }
+        const activeThreshold = existingStock?.threshold ?? 10;
 
         // ─────────────────────────────
         // ADD STOCK
@@ -685,43 +676,45 @@ Return ALL items found, even if there are 50+ items.`
 
           console.log('current db qty:', currentQty, 
                       'adding:', item.qty,
-                      'result will be:', newQty,
-                      'threshold to save:', userThreshold);
+                      'result will be:', newQty);
 
           // Update or insert stock table
           if (existingStock) {
+            // When stock row already EXISTS:
+            // Only update current_qty and last_updated
+            // NEVER touch threshold
             const { error: stUpdateErr } = await supabase
               .from('stock')
               .update({
                 current_qty: newQty,
-                threshold: userThreshold,
                 last_updated: now
               })
-              .eq('product_id', productId);
+              .eq('product_id', productId)
+              .eq('project_id', currentProjectId);
 
             if (stUpdateErr) throw stUpdateErr;
           } else {
+            // When stock row does NOT exist (first time):
+            // Set threshold with default value of 10
             const { error: stInsertErr } = await supabase
               .from('stock')
               .insert({
                 product_id: productId,
                 project_id: currentProjectId,
-                current_qty: newQty,
-                threshold: userThreshold,
+                current_qty: item.qty,
+                threshold: 10,
                 last_updated: now
               });
 
             if (stInsertErr) throw stInsertErr;
           }
 
-          const finalThreshold = userThreshold ?? 10;
-
           // ─────────────────────────────
           // Resolve active alert if stock
           // now meets or exceeds threshold
           // ─────────────────────────────
 
-          if (newQty >= finalThreshold) {
+          if (newQty >= activeThreshold) {
             try {
               const { error: resolveErr } =
                 await supabase
@@ -797,10 +790,10 @@ Return ALL items found, even if there are 50+ items.`
               .from('stock')
               .update({
                 current_qty: newQty,
-                threshold: userThreshold,
                 last_updated: now
               })
-              .eq('product_id', productId);
+              .eq('product_id', productId)
+              .eq('project_id', currentProjectId);
 
             if (stDeductErr) throw stDeductErr;
           }
@@ -847,11 +840,9 @@ Return ALL items found, even if there are 50+ items.`
           // Step 8: LOW STOCK ALERT
           // ─────────────────────────────
 
-          const finalThreshold = userThreshold ?? 10;
-
           if (
             newQty <
-            finalThreshold
+            activeThreshold
           ) {
 
             console.log(
@@ -862,7 +853,7 @@ Return ALL items found, even if there are 50+ items.`
                   currentProjectId,
                 currentQty:
                   newQty,
-                threshold: finalThreshold
+                threshold: activeThreshold
               }
             );
 
@@ -903,7 +894,7 @@ Return ALL items found, even if there are 50+ items.`
                         product_id: productId,
                         project_id: currentProjectId,
                         current_qty: newQty,
-                        threshold: finalThreshold
+                        threshold: activeThreshold
                       }
                     }
                   )
@@ -987,7 +978,6 @@ Return ALL items found, even if there are 50+ items.`
         id: newId,
         name: '',
         qty: 0,
-        threshold: '',
         unit: 'pcs'
       }
     ]);
@@ -1115,7 +1105,7 @@ Return ALL items found, even if there are 50+ items.`
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 pb-4">
           <div>
             <h1 className="text-2xl font-bold text-slate-900 font-heading tracking-tight">{confirmTitle}</h1>
-            <p className="text-slate-400 text-xs mt-0.5">Please review the extracted quantities and alert thresholds before submitting</p>
+            <p className="text-slate-400 text-xs mt-0.5">Please review the extracted items, quantities, and units before submitting</p>
           </div>
           <button 
             onClick={addItem} 
@@ -1138,15 +1128,6 @@ Return ALL items found, even if there are 50+ items.`
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setItems(items.map(i => ({ ...i, threshold: '' })))}
-                      className="text-[10px] font-semibold text-slate-500 hover:text-red-600 hover:underline cursor-pointer"
-                      title="Clear threshold column for all items"
-                    >
-                      Clear Thresholds
-                    </button>
-                    <span className="text-slate-300">|</span>
-                    <button
-                      type="button"
                       onClick={() => setItems(items.map(i => ({ ...i, price: '' })))}
                       className="text-[10px] font-semibold text-slate-500 hover:text-red-600 hover:underline cursor-pointer"
                       title="Clear price column for all items"
@@ -1161,9 +1142,8 @@ Return ALL items found, even if there are 50+ items.`
                 <div className="px-4 py-2 bg-slate-100/60 border-b border-slate-200/60 flex items-center gap-3 text-[10px] font-bold text-slate-500 uppercase tracking-wider">
                   <div className="flex-1">Item Name</div>
                   <div className="w-24 text-center">Qty</div>
-                  <div className="w-24 text-center">Threshold</div>
                   <div className="w-28 text-center">Unit (UOM)</div>
-                  <div className="w-20 text-center">Price (₹)</div>
+                  <div className="w-24 text-center">Price (₹)</div>
                   <div className="w-8"></div>
                 </div>
               )}
@@ -1202,17 +1182,6 @@ Return ALL items found, even if there are 50+ items.`
                           </span>
                         )}
                       </div>
-                      <div className="w-24">
-                        <input
-                          type="number"
-                          min="0"
-                          value={item.threshold ?? ''}
-                          onChange={(e) => updateItem(item.id, 'threshold', e.target.value === '' ? '' : (parseInt(e.target.value, 10) >= 0 ? parseInt(e.target.value, 10) : ''))}
-                          className="input-field py-1.5 text-xs placeholder-slate-400 text-center"
-                          placeholder="Threshold"
-                          title="Low stock alert threshold"
-                        />
-                      </div>
                       <div className="w-28 relative">
                         <input
                           type="text"
@@ -1243,7 +1212,7 @@ Return ALL items found, even if there are 50+ items.`
                           <option value="dozen" />
                         </datalist>
                       </div>
-                      <div className="w-20">
+                      <div className="w-24">
                         <input
                           type="number"
                           min="0"
