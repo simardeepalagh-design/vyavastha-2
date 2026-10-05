@@ -30,7 +30,7 @@ export default async function handler(req, res) {
 
   const { data: stock, error: stockError } = await supabase
     .from('stock')
-    .select('current_qty, threshold, low_stock_alerted, products(name, unit)')
+    .select('id, current_qty, threshold, low_stock_alerted, products(name, unit)')
     .eq('product_id', productId).eq('project_id', projectId).maybeSingle();
   if (stockError) return res.status(500).json({ error: 'Could not fetch stock' });
   if (!stock) return res.status(404).json({ error: 'Stock item not found' });
@@ -40,9 +40,9 @@ export default async function handler(req, res) {
   // Atomically claim the alert so retries or concurrent calls send at most one email.
   const { data: claimed, error: claimError } = await supabase
     .from('stock').update({ low_stock_alerted: true })
-    .eq('product_id', productId).eq('project_id', projectId)
+    .eq('id', stock.id)
     .eq('low_stock_alerted', false).eq('threshold', stock.threshold).gt('threshold', 0)
-    .lte('current_qty', stock.threshold).select('product_id').maybeSingle();
+    .lte('current_qty', stock.threshold).select('id').maybeSingle();
   if (claimError) return res.status(500).json({ error: 'Could not claim alert' });
   if (!claimed) return res.status(200).json({ sent: false, reason: 'already-alerted' });
 
@@ -51,12 +51,12 @@ export default async function handler(req, res) {
     supabase.from('users').select('email').eq('role', 'manager').eq('project_id', projectId)
   ]);
   if (adminsResult.error || managersResult.error) {
-    await supabase.from('stock').update({ low_stock_alerted: false }).eq('product_id', productId).eq('project_id', projectId);
+    await supabase.from('stock').update({ low_stock_alerted: false }).eq('id', stock.id).eq('low_stock_alerted', true);
     return res.status(500).json({ error: 'Could not fetch project recipients' });
   }
   const recipients = [...new Set([...adminsResult.data, ...managersResult.data].map(row => row.email).filter(Boolean))];
   if (recipients.length === 0) {
-    await supabase.from('stock').update({ low_stock_alerted: false }).eq('product_id', productId).eq('project_id', projectId);
+    await supabase.from('stock').update({ low_stock_alerted: false }).eq('id', stock.id).eq('low_stock_alerted', true);
     return res.status(200).json({ sent: false, reason: 'no-recipients' });
   }
 
@@ -64,14 +64,16 @@ export default async function handler(req, res) {
   const name = product?.name || 'Inventory item';
   const unit = product?.unit ? ` ${product.unit}` : '';
   const resend = new Resend(RESEND_API_KEY);
-  const { error: sendError } = await resend.emails.send({
-    from: FROM_EMAIL,
-    to: recipients,
-    subject: `Low stock: ${name}`,
-    text: `${name} is low on stock. Current quantity: ${stock.current_qty}${unit}. Threshold: ${stock.threshold}${unit}.`
-  });
-  if (sendError) {
-    await supabase.from('stock').update({ low_stock_alerted: false }).eq('product_id', productId).eq('project_id', projectId);
+  try {
+    const { error: sendError } = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: recipients,
+      subject: `Low stock: ${name}`,
+      text: `${name} is low on stock. Current quantity: ${stock.current_qty}${unit}. Threshold: ${stock.threshold}${unit}.`
+    });
+    if (sendError) throw sendError;
+  } catch (sendError) {
+    await supabase.from('stock').update({ low_stock_alerted: false }).eq('id', stock.id).eq('low_stock_alerted', true);
     return res.status(502).json({ error: 'Email could not be sent' });
   }
   return res.status(200).json({ sent: true });

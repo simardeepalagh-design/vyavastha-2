@@ -22,6 +22,24 @@ import { extractExcelWithGemini } from "../services/geminiExcel";
 import { resolveItemQuantity } from "../services/quantityResolver";
 import { isLowStock } from "../services/stockStatus";
 
+async function notifyLowStockEmail(productId, projectId, qty, threshold) {
+  if (!isLowStock(qty, threshold)) return;
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const response = await fetch('/api/send-low-stock-email', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionData.session?.access_token || ''}`
+      },
+      body: JSON.stringify({ productId, projectId })
+    });
+    if (!response.ok) console.error('Low-stock email request failed:', await response.text());
+  } catch (emailError) {
+    console.error('Low-stock email request failed:', emailError);
+  }
+}
+
 const BILLS_BUCKET = 'bills'; // single source of truth for the bucket name
 
 export default function StockFlow({ type, user }) {
@@ -664,7 +682,7 @@ export default function StockFlow({ type, user }) {
               .update({
                 current_qty: newQty,
                 last_updated: now,
-                ...(newQty > activeThreshold ? { low_stock_alerted: false } : {})
+                ...(!isLowStock(newQty, activeThreshold) ? { low_stock_alerted: false } : {})
               })
               .eq('product_id', productId)
               .eq('project_id', currentProjectId);
@@ -685,6 +703,8 @@ export default function StockFlow({ type, user }) {
 
             if (stInsertErr) throw stInsertErr;
           }
+
+          await notifyLowStockEmail(productId, currentProjectId, newQty, activeThreshold);
 
           // ─────────────────────────────
           // Resolve active alert if stock
@@ -767,13 +787,16 @@ export default function StockFlow({ type, user }) {
               .from('stock')
               .update({
                 current_qty: newQty,
-                last_updated: now
+                last_updated: now,
+                ...(!isLowStock(newQty, activeThreshold) ? { low_stock_alerted: false } : {})
               })
               .eq('product_id', productId)
               .eq('project_id', currentProjectId);
 
             if (stDeductErr) throw stDeductErr;
           }
+
+          await notifyLowStockEmail(productId, currentProjectId, newQty, activeThreshold);
 
           // ─────────────────────────────
           // Step 7: Log transaction
@@ -863,28 +886,6 @@ export default function StockFlow({ type, user }) {
               console.log('Alert already exists, skip email')
             }
 
-            const crossedIntoLowStock =
-              Number(activeThreshold) > 0 &&
-              Number(currentQty) > Number(activeThreshold) &&
-              isLowStock(newQty, activeThreshold);
-            if (crossedIntoLowStock && !existingStock?.low_stock_alerted && !transactionErr) {
-              try {
-                const { data: sessionData } = await supabase.auth.getSession();
-                const response = await fetch('/api/send-low-stock-email', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    Authorization: `Bearer ${sessionData.session?.access_token || ''}`
-                  },
-                  body: JSON.stringify({ productId, projectId: currentProjectId })
-                });
-                if (!response.ok) {
-                  console.error('Low-stock email request failed:', await response.text());
-                }
-              } catch (emailError) {
-                console.error('Low-stock email request failed:', emailError);
-              }
-            }
           }
         }
       }

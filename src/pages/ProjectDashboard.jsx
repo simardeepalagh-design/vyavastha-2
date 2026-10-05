@@ -16,6 +16,24 @@ import { supabase } from '../supabase';
 import { getStockStatus, isLowStock } from '../services/stockStatus';
 import { ProjectContext } from '../context/ProjectContext';
 
+async function notifyLowStockEmail(productId, projectId, qty, threshold) {
+  if (!isLowStock(qty, threshold)) return;
+  try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const response = await fetch('/api/send-low-stock-email', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionData.session?.access_token || ''}`
+      },
+      body: JSON.stringify({ productId, projectId })
+    });
+    if (!response.ok) console.error('Low-stock email request failed:', await response.text());
+  } catch (emailError) {
+    console.error('Low-stock email request failed:', emailError);
+  }
+}
+
 export default function ProjectDashboard({ user }) {
   const navigate = useNavigate();
   const { currentProject } = useContext(ProjectContext);
@@ -65,6 +83,8 @@ export default function ProjectDashboard({ user }) {
         .eq('project_id', currentProject.id);
 
       if (stockErr) throw stockErr;
+
+      await notifyLowStockEmail(productId, currentProject.id, qtyToSave, thresholdToSave);
 
       // 2. Update products table for unit if provided
       if (editingUnitVal.trim()) {
@@ -119,6 +139,8 @@ export default function ProjectDashboard({ user }) {
         .eq('project_id', currentProject.id);
 
       if (stockErr) throw stockErr;
+
+      await notifyLowStockEmail(thresholdModalItem.id, currentProject.id, thresholdModalItem.qty, val);
 
       // Handle alerts based on new threshold
       if (isLowStock(thresholdModalItem.qty, val)) {
