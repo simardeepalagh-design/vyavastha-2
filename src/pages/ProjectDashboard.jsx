@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { stockMovementData } from '../data';
 import { supabase } from '../supabase';
+import { getStockStatus, isLowStock } from '../services/stockStatus';
 import { ProjectContext } from '../context/ProjectContext';
 
 export default function ProjectDashboard({ user }) {
@@ -57,6 +58,7 @@ export default function ProjectDashboard({ user }) {
         .update({
           current_qty: qtyToSave,
           threshold: thresholdToSave,
+          ...(!isLowStock(qtyToSave, thresholdToSave) ? { low_stock_alerted: false } : {}),
           last_updated: new Date().toISOString()
         })
         .eq('product_id', productId)
@@ -110,6 +112,7 @@ export default function ProjectDashboard({ user }) {
         .from('stock')
         .update({
           threshold: val,
+          ...(!isLowStock(thresholdModalItem.qty, val) ? { low_stock_alerted: false } : {}),
           last_updated: new Date().toISOString()
         })
         .eq('product_id', thresholdModalItem.id)
@@ -118,7 +121,7 @@ export default function ProjectDashboard({ user }) {
       if (stockErr) throw stockErr;
 
       // Handle alerts based on new threshold
-      if (thresholdModalItem.qty < val) {
+      if (isLowStock(thresholdModalItem.qty, val)) {
         const { data: existingAlert } = await supabase
           .from('alerts')
           .select('id')
@@ -242,7 +245,7 @@ export default function ProjectDashboard({ user }) {
           threshold: s.threshold,
           unit: p.unit || 'pcs',
           lastUpdated: new Date(s.last_updated).toLocaleDateString(),
-          status: s.current_qty < s.threshold ? 'Low Stock' : 'Healthy'
+          status: getStockStatus(s.current_qty, s.threshold)
         };
       });
 
@@ -254,7 +257,7 @@ export default function ProjectDashboard({ user }) {
       const totalTransactionsThisWeek = txns.filter(t => new Date(t.timestamp) > sevenDaysAgo).length;
       const addedThisWeek = txns.filter(t => t.type === 'inward' && new Date(t.timestamp) > sevenDaysAgo).length;
       
-      const lowStockItems = stks.filter(s => s.current_qty < s.threshold).length;
+      const lowStockItems = stks.filter(s => isLowStock(s.current_qty, s.threshold)).length;
 
       // Top products
       const topProductsData = [...stockTableData]
@@ -747,7 +750,7 @@ export default function ProjectDashboard({ user }) {
                     </td>
                     <td className="p-4 text-xs text-slate-400">{item.lastUpdated}</td>
                     <td className="p-4">
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold border ${item.status === 'Healthy' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'}`}>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold border ${item.status === 'Healthy' ? 'bg-green-50 text-green-700 border-green-200' : item.status === 'Out of Stock' ? 'bg-slate-100 text-slate-700 border-slate-300' : 'bg-red-50 text-red-700 border-red-200'}`}>
                         {item.status}
                       </span>
                     </td>

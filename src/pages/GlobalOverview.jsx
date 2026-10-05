@@ -21,6 +21,7 @@ import {
   X
 } from 'lucide-react';
 import { supabase } from '../supabase';
+import { getStockStatus } from '../services/stockStatus';
 import { ProjectContext } from '../context/ProjectContext';
 
 export default function GlobalOverview({ user }) {
@@ -104,7 +105,7 @@ export default function GlobalOverview({ user }) {
         
         let stockHealth = 100;
         if (projectStock.length > 0) {
-          const healthyItems = projectStock.filter(s => s.current_qty >= s.threshold).length;
+          const healthyItems = projectStock.filter(s => getStockStatus(s.current_qty, s.threshold) === 'Healthy').length;
           stockHealth = Math.round((healthyItems / projectStock.length) * 100);
         } else if (projectProducts.length === 0) {
           stockHealth = 100;

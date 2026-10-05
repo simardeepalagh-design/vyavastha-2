@@ -20,6 +20,7 @@ import * as XLSX from "xlsx";
 import Papa from "papaparse";
 import { extractExcelWithGemini } from "../services/geminiExcel";
 import { resolveItemQuantity } from "../services/quantityResolver";
+import { isLowStock } from "../services/stockStatus";
 
 const BILLS_BUCKET = 'bills'; // single source of truth for the bucket name
 
@@ -618,7 +619,7 @@ export default function StockFlow({ type, user }) {
         } = await supabase
           .from('stock')
           .select(
-            'current_qty, threshold'
+            'current_qty, threshold, low_stock_alerted'
           )
           .eq(
             'product_id',
@@ -662,7 +663,8 @@ export default function StockFlow({ type, user }) {
               .from('stock')
               .update({
                 current_qty: newQty,
-                last_updated: now
+                last_updated: now,
+                ...(newQty > activeThreshold ? { low_stock_alerted: false } : {})
               })
               .eq('product_id', productId)
               .eq('project_id', currentProjectId);
@@ -815,10 +817,7 @@ export default function StockFlow({ type, user }) {
           // Step 8: LOW STOCK ALERT
           // ─────────────────────────────
 
-          if (
-            newQty <
-            activeThreshold
-          ) {
+          if (isLowStock(newQty, activeThreshold)) {
 
             console.log(
               'LOW STOCK CONDITION TRIGGERED',
@@ -858,26 +857,33 @@ export default function StockFlow({ type, user }) {
               if (alertInsertErr) {
                 console.error('Alert insert error:', alertInsertErr)
               } else {
-                console.log('New alert created, sending email...')
-                
-                // Send email
-                const { data: emailData, error: emailErr } = 
-                  await supabase.functions.invoke(
-                    'send-low-stock-alert',
-                    {
-                      body: {
-                        product_id: productId,
-                        project_id: currentProjectId,
-                        current_qty: newQty,
-                        threshold: activeThreshold
-                      }
-                    }
-                  )
-                
-                console.log('Email function response:', emailData, emailErr)
+                console.log('New low-stock alert created')
               }
             } else {
               console.log('Alert already exists, skip email')
+            }
+
+            const crossedIntoLowStock =
+              Number(activeThreshold) > 0 &&
+              Number(currentQty) > Number(activeThreshold) &&
+              isLowStock(newQty, activeThreshold);
+            if (crossedIntoLowStock && !existingStock?.low_stock_alerted && !transactionErr) {
+              try {
+                const { data: sessionData } = await supabase.auth.getSession();
+                const response = await fetch('/api/send-low-stock-email', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${sessionData.session?.access_token || ''}`
+                  },
+                  body: JSON.stringify({ productId, projectId: currentProjectId })
+                });
+                if (!response.ok) {
+                  console.error('Low-stock email request failed:', await response.text());
+                }
+              } catch (emailError) {
+                console.error('Low-stock email request failed:', emailError);
+              }
             }
           }
         }
