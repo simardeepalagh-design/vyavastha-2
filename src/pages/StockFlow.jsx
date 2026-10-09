@@ -80,7 +80,7 @@ export default function StockFlow({ type, user }) {
       reader.onload = (e) => {
         img.onload = () => {
           const canvas = document.createElement('canvas');
-          const maxWidth = 1600;
+          const maxWidth = 1400;
           const scale = Math.min(1, maxWidth / img.width);
 
           canvas.width = img.width * scale;
@@ -89,13 +89,18 @@ export default function StockFlow({ type, user }) {
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-          canvas.toBlob((blob) => {
-            resolve(
-              new File([blob], file.name, {
-                type: 'image/jpeg'
-              })
-            );
-          }, 'image/jpeg', 0.8);
+          const encode = (quality) => new Promise((done) => canvas.toBlob(done, 'image/jpeg', quality));
+          (async () => {
+            let blob = await encode(0.78);
+            while (blob && blob.size > 3_000_000 && canvas.width > 700) {
+              canvas.width = Math.round(canvas.width * 0.8);
+              canvas.height = Math.round(canvas.height * 0.8);
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              blob = await encode(0.68);
+            }
+            resolve(blob ? new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' }) : file);
+          })();
         };
 
         img.src = e.target.result;
@@ -233,45 +238,23 @@ export default function StockFlow({ type, user }) {
     return signedData.signedUrl;
   };
 
-  const callGeminiWithRetry = async (base64, mimeType, retries = 3) => {
-    for (let i = 0; i < retries; i++) {
-      const response = await fetch(
-        'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + 
-        import.meta.env.VITE_GEMINI_API_KEY,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            contents: [{
-              parts: [
-                { inline_data: { mime_type: mimeType, data: base64 } },
-                { text: 'Read this bill image carefully. Extract EVERY line item from the table. Look for columns like Material Description, UOM, Requested Qty, Issued Qty. Return ONLY a JSON array, no markdown, no explanation: [{"name":"material name","qty":100,"unit":"EA"}]. Extract ALL rows. Do not skip any row.' }
-              ]
-            }]
-          })
-        }
-      );
-
-      if (response.status === 503 || response.status === 429) {
-        console.log('Gemini busy, retrying in 3 seconds... attempt', i + 1);
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        continue;
-      }
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(
-          `Gemini API Error (${response.status}): ${errData.error?.message || response.statusText}`
-        );
-      }
-
-      const data = await response.json();
-      const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) throw new Error('No response from Gemini');
-      const cleaned = text.replace(/```json|```/g, '').trim();
-      return JSON.parse(cleaned);
+  const callBillExtraction = async (base64, mimeType) => {
+    const { data } = await supabase.auth.getSession();
+    const token = data.session?.access_token;
+    if (!token) throw new Error('Please sign in again before scanning a bill.');
+    const request = () => fetch('/api/extract-bill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ base64, mimeType }),
+    });
+    let response = await request();
+    if (response.status === 429) {
+      await new Promise(resolve => setTimeout(resolve, 1200));
+      response = await request();
     }
-    throw new Error('Gemini is busy. Please try again in a moment.');
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || 'Could not read bill. Please try again.');
+    return payload.items;
   };
 
   const handleFileUpload = async (e) => {
@@ -299,35 +282,17 @@ export default function StockFlow({ type, user }) {
     setBillFileType(getFileKind(file));
     setStep(2);
 
-    const reader = new FileReader();
-
-    reader.onloadend = async () => {
-      try {
-        const base64 =
-          reader.result?.split(',')[1];
-
-        if (!base64) {
-          throw new Error(
-            'Image could not be read'
-          );
-        }
-
-        const compressedFile =
-          await compressImage(file);
-
-        const uploadedBillImageUrl =
-          await uploadBillImage(
-            compressedFile
-          );
-
-        setBillImageUrl(
-          uploadedBillImageUrl
-        );
-
-        const parsedItems = await callGeminiWithRetry(
-          base64,
-          file.type || 'image/jpeg'
-        );
+    try {
+        const compressedFile = await compressImage(file);
+        if (compressedFile.size > 3_000_000) throw new Error('File exceeds the 3 MB upload limit. Please choose a smaller image.');
+        const uploadedBillImageUrl = await uploadBillImage(compressedFile);
+        setBillImageUrl(uploadedBillImageUrl);
+        const buffer = await compressedFile.arrayBuffer();
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+        const mimeType = compressedFile.type || (getFileKind(file) === 'pdf' ? 'application/pdf' : 'image/jpeg');
+        const parsedItems = await callBillExtraction(btoa(binary), mimeType);
 
         const newItems = (Array.isArray(parsedItems) ? parsedItems : []).map(
           (item, index) => {
@@ -356,7 +321,7 @@ export default function StockFlow({ type, user }) {
         setItems(newItems);
         setStep(3);
 
-      } catch (err) {
+    } catch (err) {
         console.error(
           'Gemini error:',
           err
@@ -374,20 +339,7 @@ export default function StockFlow({ type, user }) {
 
         setItems([]);
         setStep('upload');
-      }
-    };
-
-    reader.onerror = () => {
-      setError('Could not load image file.');
-      alert(
-        'Could not load image file.'
-      );
-
-      setItems([]);
-      setStep('upload');
-    };
-
-    reader.readAsDataURL(file);
+    }
   };
 
   const handleExcelUpload = async (e) => {
@@ -409,6 +361,9 @@ export default function StockFlow({ type, user }) {
       e.target.value = '';
       return;
     }
+
+    setError(null);
+    setStep(2);
 
     const extension =
       file.name
@@ -1001,6 +956,7 @@ export default function StockFlow({ type, user }) {
               type="file"
               className="hidden"
               accept="image/*,.pdf"
+              disabled={isSubmitting || step === 2}
               onChange={handleFileUpload}
             />
 
@@ -1009,6 +965,7 @@ export default function StockFlow({ type, user }) {
               type="file"
               className="hidden"
               accept=".xlsx,.xls,.csv"
+              disabled={isSubmitting || step === 2}
               onChange={handleExcelUpload}
             />
 
@@ -1017,7 +974,7 @@ export default function StockFlow({ type, user }) {
             </div>
 
             <h3 className="text-base font-bold text-slate-800 font-heading mb-1">Drop bill image here or click to upload</h3>
-            <p className="text-slate-400 text-xs mb-6">Supported formats: JPG, PNG • Max size 10MB</p>
+            <p className="text-slate-400 text-xs mb-6">Supported formats: JPG, PNG, PDF • Max upload size 3MB</p>
 
             <div className="flex flex-wrap justify-center gap-3">
               <label

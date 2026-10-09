@@ -1,5 +1,15 @@
 # React + Vite
 
+## Vercel environment variables
+
+Set these server-side variables in Vercel (none should use the `VITE_` prefix):
+
+- `GEMINI_API_KEY`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
+Bill scanning accepts JPG, PNG, and PDF. Images are resized and compressed in the browser; uploads and extraction requests are limited to 3 MB. PDFs are sent directly and must already fit that limit.
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:
